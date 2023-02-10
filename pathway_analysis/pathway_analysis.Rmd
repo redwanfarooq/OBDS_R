@@ -79,14 +79,14 @@ gost_results_obj <- gost(
 )
 
 # what are our outputs  
-str(gost_results_obj)
+gost_results_obj$result
 ```
 
 ```{r}
 gost_results_obj$result %>% 
-  select() %>% 
+  select(term_name, term_size, precision, recall, p_value, significant) %>% 
   filter(significant) %>% 
-  arrange(desc(intersection_size))
+  arrange(desc(precision), desc(recall))
 ```
 
 ```{r}
@@ -96,16 +96,13 @@ gost_results_obj$result %>%
 
 ```{r}
 # what does as_short_link = FALSE do in gost() function? 
-
+# Return results as link to web interface
 ```
-
-Answer -\>
 
 ```{r}
 # Filter results table for genesets with between 5-300 genes 
-
-
-
+gost_results_obj$result %>% 
+  filter(term_size >= 5, term_size <= 300)
 ```
 
 2.  Try querying multiple gene lists at the same time (up and down regulated genes) using Multiple queries - see the documentation
@@ -114,24 +111,22 @@ Answer -\>
 
 ```
 
-Can you plot these querys together?
+Can you plot these queries together?
 
 ```{r}
-
 
 ```
 
 Output the get_version_info() to save the versions of the databases that were used for the analysis!!
 
 ```{r}
-
+get_version_info()
 ```
 
 Output the sessionInfo() so know what packages we used
 
 ```{r}
 sessionInfo()
-
 ```
 
 Now knit your report to get a lovely html file that you can share -\> this is good practise as it creates a permanent record of your plots/analysis output and also makes sure your script runs without error from start to finish!
