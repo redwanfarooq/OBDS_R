@@ -1,0 +1,564 @@
+---
+title: "DESeq2 Tutorial"
+author: "Charlie George & Modified by Devika Agarwal"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Useful resources
+
+-   **DESeq2 Vignette** - <http://www.bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html>
+-   **Bioconductor RNAseq Workflow Book** - <http://master.bioconductor.org/packages/release/workflows/vignettes/rnaseqGene/inst/doc/rnaseqGene.html>
+
+# load packages
+
+-   what do these packages do? Add comments to remind you what they do
+
+```{r setup, include=FALSE}
+library(pheatmap)   
+library(RColorBrewer)
+library(tidyverse)     
+library(DESeq2)      
+library(ashr)          
+library(apeglm)      
+library(org.Mm.eg.db)
+```
+
+# 1 Prepping our input data to make deseq2dataset object
+
+## Import counts table
+
+-   We made this (or a very similar version) using featurecounts in week1 on the cluster
+-   raw data -\> fastqc -\> hisat2 -\> featurecounts
+
+```{r}
+# Import counts data to variable called featurecounts_table
+# The file has a comment line we need to ignore at top of file 
+featurecounts_table <- read_tsv("/t1-data/project/obds/shared/resources/3_r_stats_genomics/rnaseq_differential_expression/allsamples_counts.tsv.gz", comment = "#")
+
+# lets save the gene info (Chr,Start,End,Strand, Length) columns as a seperate dataframe (df) incase we need it later
+# call this table gene_info and set row names as Geneid
+gene_info <- featurecounts_table %>%
+  column_to_rownames("Geneid") %>%                     
+  dplyr::select(Chr, Start, End, Strand, Length)
+
+
+# create a counts table without the gene info (Chr,Start,End,Strand, Length) columns
+# to get a clean counts table where:
+# rows = genename, columns = samples
+counts_table <- featurecounts_table %>%
+  column_to_rownames("Geneid") %>%
+  dplyr::select(ends_with(".bam")) %>% # Select only columns ending with  ".bam" (sample name columns)
+  rename_with(~ str_remove(.x, ".bam")) %>% # Trim ".bam" from the end of column names 
+  as.matrix()
+```
+
+```{r}
+# check the dimensions of this counts_table table using dim() -> should have 39,179 genes and 8 cols 
+dim(counts_table)
+```
+
+# Right now lets import and set up our table of sample information
+
+```{r}
+sample_info <- read_tsv("/t1-data/project/obds/shared/resources/3_r_stats_genomics/rnaseq_differential_expression/PRJEB18572_sample_info.tsv") %>% 
+  column_to_rownames("sample_id")
+
+# What class is the cell_type currently? 
+class(sample_info$cell_type)
+
+# We want to change it to a factor with 2 levels (the hypothesis we will test)
+# Which should be our reference level? 
+sample_info <- sample_info %>% 
+  mutate(
+    cell_type = factor(cell_type, levels = c("CD4", "CD8")),
+    genotype = as_factor(genotype),
+    replicate = factor(replicate, levels = c(1, 2, 3))
+  )
+
+# what other columns might we want to include in our design that we want to change to factors? 
+# See above
+```
+
+```{r}
+sample_info
+```
+
+# Check the sample names are the same and in the same order in the sample_info and counts_table
+
+```{r}
+# Column names of the count table and row names of the sample info table must be in the same order
+# Check this 
+colnames(counts_table) == rownames(sample_info)
+```
+
+# Generate DESeqDataSet object
+
+```{r}
+# look up function to use from slides, find help and create an object called dds
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_table,
+  colData = sample_info,
+  rowData = gene_info,
+  design = ~ cell_type
+)
+```
+
+## Investigate the dds object
+
+```{r include=FALSE}
+# what does it look like? - e.g. use str(dds)
+str(dds)
+
+# how to access counts
+# counts(dds)
+assay(dds)
+
+# access colData i.e the sample info table
+colData(dds)
+
+# access rowData
+rowData(dds)
+
+# access the design
+design(dds)
+
+# does it have any rowRanges()?
+rowRanges(dds)
+
+# what are its rownames and colnames?
+rownames(dds)
+colnames(dds)
+
+# what attributes does it have?
+attributes(dds)
+```
+
+## How to subset a DESeqDataSet Object
+
+```{r}
+# practice subsetting dds object
+# select first 3 columns
+dds[, 1:3]
+```
+
+# Filter out unexpressed genes
+
+-   It's good practice to filter out genes with 0 counts across all samples at the start
+-   This reduces the size of the object and makes computations quicker without affecting the results as these genes are filtered out anyway in the analysis
+-   Note that more strict filtering to increase power is automatically applied via independent filtering on the mean of normalized counts within the results function.
+
+```{r}
+# filter out genes that have 0 counts across all samples and save as an object called `dds_filtered`
+zero_count <- rowSums(counts(dds)) == 0
+dds_filtered <- dds[!zero_count, ]
+
+# Alternative methods
+# 1)
+# nonzero_count <- rowSums(counts(dds)) != 0
+# dds_filtered <- dds[nonzero_count, ]
+# 2)
+# nonzero_count_indices <- which(rowSums(counts(dds)) != 0)
+# dds_filtered <- dds[nonzero_count_indices, ]
+
+# check dims of dds_filtered  
+dim(dds_filtered)
+```
+
+# Perform exploratory analysis on dds_filtered object
+
+1.  transform dds_filtered object using `rlog()` functions
+    -   name your new variables `rlog_transformed_dds`
+    -   we want to set `blind = TRUE` as because we are doing a QC step we do not want the function to take into account the experimental design, we want it to be an unbiased look at how the samples cluster
+    -   check the class of the rlog_transformed_dds objects
+    -   you can look at the tranformed counts table using `assay()`
+
+NOTE we only use this tranformed data for QC not for downstream analysis or differential expression itself!!
+
+```{r}
+#transform data using `rlog()` functions
+rlog_transformed_dds <- rlog(dds_filtered, blind = TRUE)
+
+# Notes on `blind` parameter: 
+  # blind = TRUE is default
+  # blind = TRUE is not the appropriate choice if you expect many or majority of genes to have large differences in counts explainable by   experimental design
+  # Mike Love recommends blind = FALSE for visualisation, clustering and machine learning but blind = TRUE for QC
+  # Experimental design is only used for calculating the gene-wise dispersion estimates in order to fit a trend line through the dispersions over the mean
+
+  
+# check the class of these variable objects 
+class(rlog_transformed_dds)
+  
+# get and look at the tranformed counts table using `assay()`
+assay(rlog_transformed_dds)
+```
+
+# Optional: If you have time do the transformation again but using the vst() function
+
+-   As a guide
+    -   rlog - more robust than VST when size factors vary widely (10x)
+    -   VST - less sensitive to high count outliers than rlog, quicker - recommended most often
+
+```{r}
+# get vst transformed data using vst() 
+vst_transformed_data <- vst(dds_filtered, blind = TRUE)
+
+class(vst_transformed_data)
+
+assay(vst_transformed_data)
+```
+
+# Now plot heatmap of sample-sample correlations using rlog transformed count data and cor()
+
+```{r}
+assay(rlog_transformed_dds)
+```
+
+```{r}
+# get correlation matrix of the rlog_transformed counts matrix to get correlations between samples 
+cor_matrix <- cor(assay(rlog_transformed_dds), method = "spearman")
+
+# use pheatmap to plot the correlation matrix 
+pheatmap(
+  cor_matrix,
+  color = colorRampPalette(brewer.pal(n = 5, name = "Reds"))(100)
+  )
+```
+
+# try plotting a heatmap of sample distances
+
+```{r}
+# get sample distances -> Annotated what this code is doing?
+# 1) Transpose transformed counts matrix (samples to rows and genes to columns)
+# 2) Calculate pairwise Euclidean distance between samples in N-dimensional space based on counts of gene1...geneN
+sampleDists <- dist(t(assay(rlog_transformed_dds))) 
+sample_distances_matrix <- as.matrix(sampleDists) 
+
+pretty_blue_colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+pheatmap(sample_distances_matrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         color = pretty_blue_colors)
+```
+
+What do you notice here!? what does it tell us about our data?
+
+Answer: There are 2 sets of duplicate samples (ERR1755082 + ERR1755088 & ERR1755083 + ERR1755089).
+
+## You can subset a dds object and interact with it like you would a DataFrame
+
+```{r}
+# remove the two suspect columns using [,] notation - remove suspicious samples 
+rlog_transformed_dds_subset <- rlog_transformed_dds[, -(7:8)]
+
+# lets replot the correlation heatmap with the subsetted data - copy code and adjust from above
+sampleDists_subset <- dist(t(assay(rlog_transformed_dds_subset))) 
+sample_distances_matrix_subset <- as.matrix(sampleDists_subset) 
+
+pheatmap(sample_distances_matrix_subset,
+         clustering_distance_rows=sampleDists_subset,
+         clustering_distance_cols=sampleDists_subset,
+         color = pretty_blue_colors)
+```
+
+What do you notice now about the data and the clustering?
+
+Answer: 2 clusters of cell types
+
+# Now lets use the plotPCA function from DESeq2 to plot PCA of rlog_transformed_data_subset
+
+```{r, fig.width=2, fig.height=1.5}
+# plot pca of rlog_transformed_dds using plotPCA()
+plotPCA(rlog_transformed_dds_subset, intgroup = "cell_type") +
+  coord_cartesian() +
+  cowplot::theme_cowplot()
+
+# what does the intgroup parameter do? have a go at changing it...
+plotPCA(rlog_transformed_dds_subset, intgroup = "replicate") +
+  coord_cartesian() +
+  cowplot::theme_cowplot()
+
+# how many variable genes is it using for pca? 
+# 500 (default)
+
+# plot the pca for all genes 
+plotPCA(rlog_transformed_dds_subset, intgroup = "cell_type", ntop = nrow(rlog_transformed_dds_subset)) +
+  coord_cartesian() +
+  cowplot::theme_cowplot()
+```
+
+What does it tell us about our sample?
+
+Answer: Majority of variance explained by first 2 PCs, PC1 represents CD4 vs CD8 cells and PC2 likely represents an additional factor of interest.
+
+------------- This is the end of our Exploratory data analysis -----------------
+
+We now go back to our original dds object with the raw counts and can update it with anything we need to from the exploratory analysis e.g. - update design with variables in sample info table we want to regress out - remove samples (poor quaility or those with name switches etc)
+
+# Revisiting our inital data
+
+What do we need to do to our data???
+
+## Update dds_filtered object if needed - call it dds_filtered_updated
+
+```{r}
+# do we need to remove/edit samples? 
+dds_filtered_updated <- dds_filtered[, 1:6]
+
+# do we want to update the design? Is this necessary in this case?
+# Not necessary, no batch effects observed in QC
+
+# e.g. design(dds) <- ~replicate + condition
+design(dds_filtered_updated)
+```
+
+# Now we can start our actual DE!!!! yay
+
+Run deseq2 modelling using one function (DESeq())
+
+```{r}
+# look at dds slots then run deseq2 function 
+# what has happened to your dds slots?
+dds_filtered_updated
+
+# run deseq2 modelling on the updated dds object in one function using DEseq() 
+dds_filtered_updated <- DESeq(dds_filtered_updated)
+
+# then extract the results
+results_obj <- results(dds_filtered_updated)
+
+# sumarise results 
+summary(results_obj)
+results_obj
+```
+
+Have a look at the outputs
+
+# Now we will run the analysis step by step to see whats going on
+
+## 1. Estimate size factors using estimateSizeFactors()
+
+```{r}
+# Calculate the size factors for each sample using estimateSizeFactors()
+estimateSizeFactors(dds_filtered_updated)
+
+# Access the size factors from the dds_filtered_updated object
+sizeFactors(dds_filtered_updated)
+
+# Do you see any systematic differences in size factors between groups?
+
+```
+
+# Optional: Plot size factors as barchart using ggplot
+
+```{r}
+dds_filtered_colData <- as.data.frame(colData(dds_filtered_updated)) %>%
+  rownames_to_column("sampleID")
+
+ggplot(dds_filtered_colData, aes(x = sampleID, y = sizeFactor, fill = cell_type)) +
+  geom_col(colour = "black") +
+  cowplot::theme_cowplot() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Get counts table normalised using size factors
+
+```{r}
+# get counts table normalised using size factors - call it normalized_counts
+normalized_counts_table <- counts(dds_filtered_updated, normalized = TRUE)
+
+# check the class of the output
+class(normalized_counts_table)
+```
+
+# 3. Estimate dispersions for each gene
+
+```{r}
+# Obtain dispersion estimates for each gene using estimateDispersions() 
+dds_filtered_updated <- estimateDispersions(dds_filtered_updated)
+
+# Plot the per-gene dispersion estimates (DESeq2 has a helper function for this)
+plotDispEsts(dds_filtered_updated)
+```
+
+## 4. Perform Wald test
+
+```{r}
+# Tests for significance of coefficients in a negative binomial GLM, using previously calculated size factors and dispersion estimates and WaldTest
+dds_filtered_updated <- nbinomWaldTest(dds_filtered_updated)
+```
+
+# So we have the actual steps that we've gone through to get to DE in one place generate the dds object again and use the DESeq() function to perform steps 1-3 in one go
+
+```{r, include=FALSE}
+# generate dds object 
+dds_final <- DESeqDataSetFromMatrix(
+  countData = counts_table,
+  colData = sample_info,
+  rowData = gene_info,
+  design = ~ cell_type
+)
+
+# filter rows with 0 counts 
+dds_final <- dds_final[rowSums(counts(dds_final)) > 0, ]
+
+# remove unwanted samples 
+dds_final <- dds_final[, 1:6]
+
+# make DESeqDataSet (dds) object 
+
+# run DESeq() 
+dds_final <- DESeq(dds_final)
+```
+
+# Get the results from your dds object - call it `results_obj`
+
+```{r}
+# What do the results() and summary() do, what arguments can you specify? 
+results_obj <- results(dds_final)
+```
+
+# Optional - if we have time: Access the coefficients of the Negative Binomial GLM -- see vignette("DESeq2")
+
+```{r}
+# Coefficients = log2FoldChange
+```
+
+# Plot normalised counts for ENSMUSG00000041779
+
+checkout the 'plotCounts()\` function
+
+```{r}
+# Plot normalised counts for gene ENSMUSG00000041779
+plotCounts(dds_final, gene = "ENSMUSG00000041779", intgroup = "cell_type")
+```
+
+# Access the results table for the comparison between CD8 and CD4 T cells . You can also try to CD4 vs CD8 (i.e. switch the reference) - you could also try this for replicate 1 vs replicate 3 as a control
+
+checkout `resultsNames()` & `results()`
+
+```{r}
+results(dds_final, contrast = c("cell_type", "CD8", "CD4")) # Use contrast parameter to extract different contrasts based on pre-specified design prior to running DESeq()
+```
+
+Table should contain log2 fold changes and p-values for all genes
+
+# Plot a histogram of the raw and BH-adjusted p-values using ggplot -- do they look as expected? for CD8 vs CD4
+
+```{r}
+dds_final_pvalues <- as.data.frame(results_obj) %>%
+  rownames_to_column("sampleID") %>%
+  dplyr::select(sampleID, pvalue, padj) %>%
+  filter(!is.na(padj)) %>%
+  rename(pvalue = "Raw_p_value", padj = "Adjusted_p_value") %>%
+  pivot_longer(cols = c("Raw_p_value", "Adjusted_p_value"), names_to = "p_type", values_to = "value")
+
+ggplot(dds_final_pvalues, aes(x = value)) +
+  geom_histogram(binwidth = 0.05, fill = "grey", colour = "black", position = "dodge") +
+  facet_wrap(~ p_type) +
+  cowplot::theme_cowplot() +
+  theme(
+    axis.title = element_blank()
+  )
+```
+
+```{r}
+dds_final_pvalues_alt <- as.data.frame(results_obj) %>%
+  rownames_to_column("sampleID") %>%
+  dplyr::select(sampleID, pvalue, padj) %>%
+  filter(!is.na(padj)) %>%
+  rename(pvalue = "Raw_p_value", padj = "Adjusted_p_value")
+
+ggplot(dds_final_pvalues_alt, aes(x = Raw_p_value, y = Adjusted_p_value)) +
+  geom_point(colour = "blue") +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  coord_fixed() +
+  cowplot::theme_cowplot()
+```
+
+# Generate an MA plot of the log2 FC values for all genes using DESeq2 plotMA()
+
+```{r}
+plotMA(dds_final, alpha = 0.05)
+```
+
+# Shrink the log2 FC values using the normal, apeglm and ashr methods -\> see the vignette -- which shall we choose?
+
+```{r}
+# call your results table  called shrunkenLFC_dds_results_obj
+shrunkenLFC_dds_results_obj <- lfcShrink(dds_final, contrast = c("cell_type", "CD8", "CD4"), type = "normal")
+```
+
+```{r}
+plotMA(shrunkenLFC_dds_results_obj)
+```
+
+# Generate a results table (one shrinkage method) containing gene symbols and (if time) entrez ids
+
+```{r}
+# convert shrunkenLFC_dds_results_obj to a dataframe and call it shrunkenLFC_dds_results_df
+shrunkenLFC_dds_results_df <- as.data.frame(shrunkenLFC_dds_results_obj) %>% 
+  rownames_to_column("ENSEMBL")
+
+ensembl <- shrunkenLFC_dds_results_df$ENSEMBL
+
+# Use the org.Mm.eg.db package to get gene symbols for the ensembl gene ids (hint:you did this on bioconductor day) 
+symbol <- mapIds(org.Mm.eg.db, keys = ensembl, keytype = "ENSEMBL", column = "SYMBOL")
+
+# How many Ensembl IDs are not assigned an gene symbol and how many gene symbols are duplicated?
+sum(is.na(symbol)) # Number of missing gene symbols
+sum(duplicated(symbol[which(!is.na(symbol))])) # Number of duplicated gene symbols
+
+keytypes(org.Mm.eg.db)      #to remind us of what keytypes are in this particular db
+
+# use mapIds() to get 1:1 mapping for SYMBOL, ENTREZ and MGI
+entrezid <- mapIds(org.Mm.eg.db, keys = ensembl, keytype = "ENSEMBL", column = "ENTREZID")
+mgi <- mapIds(org.Mm.eg.db, keys = ensembl, keytype = "ENSEMBL", column = "MGI")
+
+# add mapId vectors to  shrunkenLFC_dds_results_df
+shrunkenLFC_dds_results_df <- shrunkenLFC_dds_results_df %>% 
+  mutate(
+    SYMBOL = symbol,
+    ENTREZID = entrezid,
+    MGI = mgi
+  ) %>% 
+  dplyr::select(ENSEMBL, SYMBOL, ENTREZID, MGI, everything())
+```
+
+# Export all the results to CSV
+
+```{r}
+write_csv(shrunkenLFC_dds_results_df, "CD8_vs_CD4_DE_results_lfcshrinkage_allgenes.csv")
+```
+
+# Filter shrunkenLFC_dds_results_df and save as CSV
+
+```{r}
+#Filter the results table for padj < 0.05 and absolute log2 FC > 1, and write to a CSV file
+res_0.05 <- shrunkenLFC_dds_results_df %>% 
+    dplyr::filter(padj < 0.05 & abs(log2FoldChange) > 1)
+
+#Get upregulated genes - Filter the results table for padj < 0.05 and log2FoldChange FC > 1, and write to a CSV file
+res_0.05_up <- shrunkenLFC_dds_results_df %>% 
+    dplyr::filter(padj < 0.05 & log2FoldChange > 1)
+
+#Get doownregulated genes - Filter the results table for padj < 0.05 and log2FoldChange FC < 1, and write to a CSV file
+res_0.05_down <- shrunkenLFC_dds_results_df %>% 
+    dplyr::filter(padj < 0.05 & log2FoldChange < -1)
+
+write_csv(res_0.05, 
+          "CD8_vs_CD4_DKO_DE_results_lfcshrinkage_0.05_log2FC1.csv")
+
+write_csv(res_0.05_up,
+          "CD8_vs_CD4_DKO_DE_results_lfcshrinkage_0.05_log2FC1_up.csv")
+
+write_csv(res_0.05_down,
+          "CD8_vs_CD4_DKO_DE_results_lfcshrinkage_0.05_log2FC1_down.csv")
+```
+
+Well done! That is the basics of exploratory data analysis for bulk RNAseq and differential gene expression - these statistical methods underly the foundations for single cell differential expression analysis, although scRNA-seq has a few extra paramterisations and complications to take into account.
+
+We will now progress to pathway/geneset analysis to get some biological meaning from our DE gene list....

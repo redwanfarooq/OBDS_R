@@ -1,0 +1,137 @@
+---
+title: "OBDS Gene Set Enrichment and Pathway Analysis Practical"
+author: "Charlie George"
+date: "15/10/2021"
+output: html_document
+---
+
+This is the pathway enrichment analysis practical of the OBDS course
+
+-   The first part of this practical is using gprofiler to perform ORA on output dataset of differentially expressed genes from DESeq2
+
+-   The major aim of this exercise is to get you used to reading online tool documentation and playing with different parameters.
+
+# load packages
+
+```{r setup, include=FALSE}
+# load packages
+library(tidyverse)
+library(gprofiler2)
+```
+
+# Read in our tables from this morning in a new Rmd file
+
+```{r}
+# read in results table we output from DESeq2 this morning using tidyverse read_csv()
+all_genes_df <- read_csv("CD8_vs_CD4_DE_results_lfcshrinkage_allgenes.csv") # Relative path to symlink to CSV file in project folder
+
+# check its dimensions - and look at the top of the file -> what does this tell us about our table? 
+# dim = 22,535 -> this contains all genes -> need to filter to get those tested 
+all_genes_df
+```
+
+We want to perform a classic Over representation analysis (ORA) using gprofiler - to do this we first need to create our gene subsets
+
+```{r}
+# Subset 1 - All genes tested in differential expression (this is our background/control gene list) - i.e. remove padj == NA 
+all_genes_tested_df <- all_genes_df %>% filter(!is.na(padj))
+  
+# Subset 2 - All sig upregulated genes (padj < 0.05. & log2FoldChange > 1)
+upreg_genes_df <- all_genes_tested_df %>% filter(padj < 0.05 & log2FoldChange > 1)
+
+# Subset 3 - All sig downregulated genes (padj < 0.05. & log2FoldChange < 1)
+downreg_genes_df <- all_genes_tested_df %>% filter(padj < 0.05 & log2FoldChange < -1)
+
+# Check the dimensions of each of your dataframes using dim()
+dim(all_genes_tested_df)
+dim(upreg_genes_df)
+dim(downreg_genes_df)
+
+# all_genes_df_filtered should be 17729
+# upreg_genes_df should be 915
+# downreg_genes_df should be 1204
+```
+
+```{r}
+# from each of these dataframes get a vector of the ensembl ids 
+all_gene_ids <- all_genes_tested_df$ENSEMBL
+    
+upreg_gene_ids <- upreg_genes_df$ENSEMBL
+    
+downreg_gene_ids <- downreg_genes_df$ENSEMBL
+```
+
+#Perform ORA using gprofiler
+
+1.  Look at documentation - <https://cran.r-project.org/web/packages/gprofiler2/vignettes/gprofiler2.html>
+
+```{r}
+# use the gost() function - what parameters should we include/change??
+# we want to test the ORA of upreg_gene_ids vs our all_gene_ids
+
+# get help for function
+
+# write query and assign to output variable named `gost_results_obj`
+gost_results_obj <- gost(
+  query = upreg_gene_ids,
+  organism = "mmusculus",
+  correction_method = "fdr"
+)
+
+# what are our outputs  
+str(gost_results_obj)
+```
+
+```{r}
+gost_results_obj$result %>% 
+  select() %>% 
+  filter(significant) %>% 
+  arrange(desc(intersection_size))
+```
+
+```{r}
+# plot our results using in built function in g:profiler -> which one is it? 
+
+```
+
+```{r}
+# what does as_short_link = FALSE do in gost() function? 
+
+```
+
+Answer -\>
+
+```{r}
+# Filter results table for genesets with between 5-300 genes 
+
+
+
+```
+
+2.  Try querying multiple gene lists at the same time (up and down regulated genes) using Multiple queries - see the documentation
+
+```{r}
+
+```
+
+Can you plot these querys together?
+
+```{r}
+
+
+```
+
+Output the get_version_info() to save the versions of the databases that were used for the analysis!!
+
+```{r}
+
+```
+
+Output the sessionInfo() so know what packages we used
+
+```{r}
+sessionInfo()
+
+```
+
+Now knit your report to get a lovely html file that you can share -\> this is good practise as it creates a permanent record of your plots/analysis output and also makes sure your script runs without error from start to finish!
